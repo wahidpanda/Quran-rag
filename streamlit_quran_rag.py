@@ -8,6 +8,7 @@ from datetime import datetime
 from urllib.parse import quote_plus
 
 import streamlit as st
+import streamlit.components.v1 as components
 import torch
 import requests
 
@@ -113,20 +114,108 @@ QUESTION_BANK = {
 }
 ALL_SAMPLE_QUESTIONS = [q for group in QUESTION_BANK.values() for q in group]
 
-# 99 Names — small subset rotated for the "Name of the day" widget.
+# The 99 Names of Allah (Asma ul-Husna): (transliteration, Arabic, meaning).
+# Arabic script is used so browser text-to-speech can pronounce it correctly.
 ASMA_UL_HUSNA = [
-    ("Ar-Rahman", "The Most Compassionate"),
-    ("Ar-Raheem", "The Most Merciful"),
-    ("Al-Malik", "The King / Sovereign"),
-    ("Al-Quddus", "The Most Holy"),
-    ("As-Salam", "The Source of Peace"),
-    ("Al-Mu'min", "The Granter of Security"),
-    ("Al-Aziz", "The Almighty"),
-    ("Al-Ghaffar", "The Ever-Forgiving"),
-    ("Al-Wahhab", "The Supreme Bestower"),
-    ("Ar-Razzaq", "The Provider"),
-    ("Al-Hakim", "The All-Wise"),
-    ("Al-Wadud", "The Most Loving"),
+    ("Ar-Rahman", "الرحمن", "The Most Compassionate"),
+    ("Ar-Raheem", "الرحيم", "The Most Merciful"),
+    ("Al-Malik", "الملك", "The King / Sovereign"),
+    ("Al-Quddus", "القدوس", "The Most Holy"),
+    ("As-Salam", "السلام", "The Source of Peace"),
+    ("Al-Mu'min", "المؤمن", "The Granter of Security"),
+    ("Al-Muhaymin", "المهيمن", "The Guardian"),
+    ("Al-Aziz", "العزيز", "The Almighty"),
+    ("Al-Jabbar", "الجبار", "The Compeller"),
+    ("Al-Mutakabbir", "المتكبر", "The Supreme in Greatness"),
+    ("Al-Khaliq", "الخالق", "The Creator"),
+    ("Al-Bari'", "البارئ", "The Originator"),
+    ("Al-Musawwir", "المصور", "The Fashioner of Forms"),
+    ("Al-Ghaffar", "الغفار", "The Ever-Forgiving"),
+    ("Al-Qahhar", "القهار", "The All-Subduer"),
+    ("Al-Wahhab", "الوهاب", "The Supreme Bestower"),
+    ("Ar-Razzaq", "الرزاق", "The Provider"),
+    ("Al-Fattah", "الفتاح", "The Opener / Judge"),
+    ("Al-Alim", "العليم", "The All-Knowing"),
+    ("Al-Qabid", "القابض", "The Withholder"),
+    ("Al-Basit", "الباسط", "The Extender"),
+    ("Al-Khafid", "الخافض", "The Abaser"),
+    ("Ar-Rafi'", "الرافع", "The Exalter"),
+    ("Al-Mu'izz", "المعز", "The Giver of Honour"),
+    ("Al-Mudhill", "المذل", "The Giver of Dishonour"),
+    ("As-Sami'", "السميع", "The All-Hearing"),
+    ("Al-Basir", "البصير", "The All-Seeing"),
+    ("Al-Hakam", "الحكم", "The Judge"),
+    ("Al-Adl", "العدل", "The Utterly Just"),
+    ("Al-Latif", "اللطيف", "The Subtle One / Most Gentle"),
+    ("Al-Khabir", "الخبير", "The All-Aware"),
+    ("Al-Halim", "الحليم", "The Forbearing"),
+    ("Al-Azim", "العظيم", "The Magnificent"),
+    ("Al-Ghafur", "الغفور", "The Great Forgiver"),
+    ("Ash-Shakur", "الشكور", "The Most Appreciative"),
+    ("Al-Ali", "العلي", "The Most High"),
+    ("Al-Kabir", "الكبير", "The Most Great"),
+    ("Al-Hafiz", "الحفيظ", "The Preserver"),
+    ("Al-Muqit", "المقيت", "The Sustainer"),
+    ("Al-Hasib", "الحسيب", "The Reckoner"),
+    ("Al-Jalil", "الجليل", "The Majestic"),
+    ("Al-Karim", "الكريم", "The Most Generous"),
+    ("Ar-Raqib", "الرقيب", "The Watchful"),
+    ("Al-Mujib", "المجيب", "The Responsive"),
+    ("Al-Wasi'", "الواسع", "The All-Encompassing"),
+    ("Al-Hakim", "الحكيم", "The All-Wise"),
+    ("Al-Wadud", "الودود", "The Most Loving"),
+    ("Al-Majid", "المجيد", "The Most Glorious"),
+    ("Al-Ba'ith", "الباعث", "The Resurrector"),
+    ("Ash-Shahid", "الشهيد", "The Witness"),
+    ("Al-Haqq", "الحق", "The Absolute Truth"),
+    ("Al-Wakil", "الوكيل", "The Trustee"),
+    ("Al-Qawiyy", "القوي", "The All-Strong"),
+    ("Al-Matin", "المتين", "The Firm"),
+    ("Al-Waliyy", "الولي", "The Protecting Friend"),
+    ("Al-Hamid", "الحميد", "The Praiseworthy"),
+    ("Al-Muhsi", "المحصي", "The All-Enumerating"),
+    ("Al-Mubdi'", "المبدئ", "The Originator"),
+    ("Al-Mu'id", "المعيد", "The Restorer"),
+    ("Al-Muhyi", "المحيي", "The Giver of Life"),
+    ("Al-Mumit", "المميت", "The Bringer of Death"),
+    ("Al-Hayy", "الحي", "The Ever-Living"),
+    ("Al-Qayyum", "القيوم", "The Self-Subsisting"),
+    ("Al-Wajid", "الواجد", "The Perceiver / Finder"),
+    ("Al-Majid", "الماجد", "The Noble / Illustrious"),
+    ("Al-Wahid", "الواحد", "The One"),
+    ("Al-Ahad", "الأحد", "The Unique / Indivisible"),
+    ("As-Samad", "الصمد", "The Eternal Refuge"),
+    ("Al-Qadir", "القادر", "The All-Powerful"),
+    ("Al-Muqtadir", "المقتدر", "The Determiner"),
+    ("Al-Muqaddim", "المقدم", "The Expediter"),
+    ("Al-Mu'akhkhir", "المؤخر", "The Delayer"),
+    ("Al-Awwal", "الأول", "The First"),
+    ("Al-Akhir", "الآخر", "The Last"),
+    ("Az-Zahir", "الظاهر", "The Manifest"),
+    ("Al-Batin", "الباطن", "The Hidden"),
+    ("Al-Wali", "الوالي", "The Governor / Patron"),
+    ("Al-Muta'ali", "المتعالي", "The Self-Exalted"),
+    ("Al-Barr", "البر", "The Source of Goodness"),
+    ("At-Tawwab", "التواب", "The Ever-Relenting"),
+    ("Al-Muntaqim", "المنتقم", "The Avenger"),
+    ("Al-Afuww", "العفو", "The Pardoner"),
+    ("Ar-Ra'uf", "الرؤوف", "The Most Kind"),
+    ("Malik-ul-Mulk", "مالك الملك", "Owner of All Sovereignty"),
+    ("Dhul-Jalali-wal-Ikram", "ذو الجلال والإكرام", "Lord of Majesty and Honour"),
+    ("Al-Muqsit", "المقسط", "The Equitable"),
+    ("Al-Jami'", "الجامع", "The Gatherer"),
+    ("Al-Ghaniyy", "الغني", "The Self-Sufficient"),
+    ("Al-Mughni", "المغني", "The Enricher"),
+    ("Al-Mani'", "المانع", "The Preventer of Harm"),
+    ("Ad-Darr", "الضار", "The Distresser"),
+    ("An-Nafi'", "النافع", "The Bestower of Benefit"),
+    ("An-Nur", "النور", "The Light"),
+    ("Al-Hadi", "الهادي", "The Guide"),
+    ("Al-Badi'", "البديع", "The Incomparable Originator"),
+    ("Al-Baqi", "الباقي", "The Everlasting"),
+    ("Al-Warith", "الوارث", "The Inheritor"),
+    ("Ar-Rashid", "الرشيد", "The Guide to the Right Path"),
+    ("As-Sabur", "الصبور", "The Most Patient"),
 ]
 
 
@@ -747,7 +836,7 @@ def run_query(query, vector_store, tokenizer, model, prompt, k, max_tokens,
 def render_daily_widgets():
     today = datetime.now().strftime("%Y-%m-%d")
     idx = int(hashlib.md5(today.encode()).hexdigest(), 16) % len(ASMA_UL_HUSNA)
-    name, meaning = ASMA_UL_HUSNA[idx]
+    name, arabic, meaning = ASMA_UL_HUSNA[idx]
 
     # streak
     if st.session_state.last_visit != today:
@@ -758,7 +847,8 @@ def render_daily_widgets():
     with c1:
         st.markdown(
             f"<div class='name-card'><span class='small-muted'>✨ Name of Allah — today</span>"
-            f"<h3 style='margin:0.2rem 0;'>{name}</h3>"
+            f"<h3 style='margin:0.2rem 0;'>{name} "
+            f"<span style='font-size:1.4rem;'>{arabic}</span></h3>"
             f"<span class='small-muted'>{meaning}</span></div>",
             unsafe_allow_html=True,
         )
@@ -1276,6 +1366,134 @@ def render_about_tab():
 
 
 # ============================================================
+# 99 NAMES — interactive grid with click-to-speak (Web Speech API)
+# ============================================================
+def render_99_names():
+    st.markdown("### ✨ Explore the 99 Names (Asma ul-Husna)")
+    st.caption("Tap any card to hear its pronunciation and meaning spoken aloud. "
+               "Uses your browser's built-in voice — no download needed.")
+
+    # Build the card grid as one self-contained HTML component so the speech
+    # synthesis runs entirely client-side (works on Streamlit Cloud, no API).
+    cards_html = ""
+    for i, (name, arabic, meaning) in enumerate(ASMA_UL_HUSNA, start=1):
+        # escape single quotes for the JS string args
+        js_name = name.replace("'", "\\'")
+        js_meaning = meaning.replace("'", "\\'")
+        js_arabic = arabic.replace("'", "\\'")
+        cards_html += f"""
+        <div class="aname-card" onclick="speakName('{js_arabic}', '{js_name}', '{js_meaning}', this)">
+            <div class="aname-top">
+                <span class="aname-num">{i}</span>
+                <span class="aname-speaker">🔊</span>
+            </div>
+            <div class="aname-arabic">{arabic}</div>
+            <div class="aname-translit">{name}</div>
+            <div class="aname-meaning">{meaning}</div>
+        </div>
+        """
+
+    html = f"""
+    <style>
+      .aname-wrap {{
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 12px; font-family: -apple-system, Segoe UI, Roboto, sans-serif;
+      }}
+      .aname-card {{
+        border-radius: 16px; padding: 14px 14px 16px;
+        background: linear-gradient(135deg, rgba(34,197,94,0.10), rgba(59,130,246,0.10));
+        border: 1px solid rgba(34,197,94,0.30);
+        cursor: pointer; transition: transform .12s ease, box-shadow .12s ease;
+        user-select: none; text-align: center;
+      }}
+      .aname-card:hover {{
+        transform: translateY(-3px);
+        box-shadow: 0 8px 22px rgba(0,0,0,0.12);
+        border-color: rgba(34,197,94,0.6);
+      }}
+      .aname-card.speaking {{
+        background: linear-gradient(135deg, rgba(34,197,94,0.28), rgba(59,130,246,0.28));
+        border-color: rgba(34,197,94,0.9);
+      }}
+      .aname-top {{ display:flex; justify-content:space-between; align-items:center; }}
+      .aname-num {{ font-size:0.72rem; color:#6b7280; font-weight:700; }}
+      .aname-speaker {{ font-size:0.95rem; opacity:0.65; }}
+      .aname-arabic {{
+        font-size:1.7rem; line-height:2.4rem; margin:6px 0 2px;
+        direction:rtl; font-family:'Traditional Arabic','Amiri',serif;
+      }}
+      .aname-translit {{ font-weight:800; font-size:1.0rem; }}
+      .aname-meaning {{ font-size:0.8rem; color:#6b7280; margin-top:3px; }}
+      .aname-hint {{ font-size:0.78rem; color:#9ca3af; margin:4px 0 12px; }}
+    </style>
+
+    <div class="aname-hint" id="voiceHint">Loading voices…</div>
+    <div class="aname-wrap">{cards_html}</div>
+
+    <script>
+      // Warm up the voice list (some browsers load it asynchronously).
+      let VOICES = [];
+      function loadVoices() {{
+        VOICES = window.speechSynthesis.getVoices();
+        const hint = document.getElementById('voiceHint');
+        const hasArabic = VOICES.some(v => (v.lang || '').toLowerCase().startsWith('ar'));
+        if (hint) {{
+          hint.textContent = hasArabic
+            ? '🔊 Arabic voice available — tap a name to listen.'
+            : '🔊 Tap a name to listen (Arabic voice not found; English narration will be used).';
+        }}
+      }}
+      if (typeof speechSynthesis !== 'undefined') {{
+        loadVoices();
+        window.speechSynthesis.onvoiceschanged = loadVoices;
+      }}
+
+      function pickArabicVoice() {{
+        return VOICES.find(v => (v.lang || '').toLowerCase().startsWith('ar')) || null;
+      }}
+
+      function speakName(arabic, translit, meaning, el) {{
+        if (typeof speechSynthesis === 'undefined') {{
+          alert('Speech is not supported in this browser.');
+          return;
+        }}
+        window.speechSynthesis.cancel();  // stop anything currently playing
+
+        // highlight the active card
+        document.querySelectorAll('.aname-card.speaking')
+                .forEach(c => c.classList.remove('speaking'));
+        if (el) el.classList.add('speaking');
+
+        const arVoice = pickArabicVoice();
+        const utterances = [];
+
+        // 1) Speak the Arabic name (use Arabic voice if available)
+        const u1 = new SpeechSynthesisUtterance(arabic);
+        if (arVoice) {{ u1.voice = arVoice; u1.lang = arVoice.lang; }}
+        else {{ u1.lang = 'ar-SA'; }}
+        u1.rate = 0.85;
+        utterances.push(u1);
+
+        // 2) Then the transliteration + meaning in English
+        const u2 = new SpeechSynthesisUtterance(translit + '. ' + meaning + '.');
+        u2.lang = 'en-US';
+        u2.rate = 0.95;
+        utterances.push(u2);
+
+        // chain them, clear highlight when done
+        u2.onend = function() {{ if (el) el.classList.remove('speaking'); }};
+        u1.onerror = function() {{ if (el) el.classList.remove('speaking'); }};
+
+        utterances.forEach(u => window.speechSynthesis.speak(u));
+      }}
+    </script>
+    """
+    # height accommodates all 99 cards in the scrollable component
+    components.html(html, height=620, scrolling=True)
+
+
+# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -1358,15 +1576,7 @@ def main():
     with daily_tab:
         render_verse_of_the_day()
         st.divider()
-        st.markdown("### ✨ Explore the 99 Names")
-        ncols = st.columns(3)
-        for i, (name, meaning) in enumerate(ASMA_UL_HUSNA):
-            with ncols[i % 3]:
-                st.markdown(
-                    f"<div class='name-card' style='margin-bottom:0.6rem;'>"
-                    f"<b>{name}</b><br><span class='small-muted'>{meaning}</span></div>",
-                    unsafe_allow_html=True,
-                )
+        render_99_names()
 
     with quiz_tab:
         render_quiz_tab()
