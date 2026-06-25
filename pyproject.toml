@@ -1,0 +1,18 @@
+[project]
+name = "quran-rag-main"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "faiss-cpu>=1.14.3",
+    "langchain-community>=0.3.9",
+    "langchain-core==0.3.21",
+    "langchain-huggingface>=0.1.2",
+    "pandas>=3.0.3",
+    "sentence-transformers>=5.6.0",
+    "streamlit>=1.58.0",
+    "torch>=2.12.1",
+    "torchvision>=0.27.1",
+    "transformers>=5.12.1",
+]
