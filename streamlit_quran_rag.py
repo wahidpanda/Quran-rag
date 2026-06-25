@@ -45,6 +45,31 @@ HADITH_COLLECTIONS = ["bukhari", "muslim", "abudawud", "ibnmajah", "tirmidhi"]
 # DuckDuckGo Instant Answer API (no key) for lightweight web validation.
 DDG_API = "https://api.duckduckgo.com/"
 
+# Network behaviour — generous timeouts + a retry, tuned for Streamlit Cloud
+# cold starts where the first outbound request is often slow.
+HTTP_TIMEOUT = 20          # seconds per request
+HTTP_RETRIES = 2           # total attempts before giving up
+HTTP_HEADERS = {"User-Agent": "QuranChatbot/1.0 (+streamlit)"}
+
+
+def http_get_json(url, params=None, timeout=HTTP_TIMEOUT, retries=HTTP_RETRIES):
+    """
+    GET a URL and parse JSON, retrying on transient failures.
+    Raises the last exception if all attempts fail — callers should let that
+    propagate (NOT return None) so st.cache_data does not cache the failure.
+    """
+    last_err = None
+    for attempt in range(retries):
+        try:
+            resp = requests.get(url, params=params, timeout=timeout, headers=HTTP_HEADERS)
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as ex:
+            last_err = ex
+            if attempt < retries - 1:
+                time.sleep(1.0 * (attempt + 1))  # simple backoff
+    raise RuntimeError(f"Request to {url} failed after {retries} attempts: {last_err}")
+
 ACCENT_THEMES = {
     "Emerald (default)": {"accent": "34, 197, 94", "accent2": "59, 130, 246"},
     "Royal Blue": {"accent": "59, 130, 246", "accent2": "168, 85, 247"},
@@ -274,23 +299,31 @@ def plan_agentic_steps(query):
 # ============================================================
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_quran_verse(reference):
-    """reference like '2:255'. Returns arabic, english, audio url, surah name."""
+    """
+    reference like '2:255' (surah:ayah) or '262' (global ayah number 1..6236).
+    Returns dict with arabic, english, audio url, surah name.
+    Raises on failure so a transient error is NOT cached as a permanent None.
+    """
+    ar = http_get_json(f"{QURAN_API}/ayah/{reference}/ar.alafasy")
+    en = http_get_json(f"{QURAN_API}/ayah/{reference}/en.asad")
+    if ar.get("status") != "OK" or en.get("status") != "OK":
+        raise RuntimeError(f"AlQuran.cloud returned non-OK status for {reference}")
+    a, e = ar["data"], en["data"]
+    return {
+        "reference": reference,
+        "surah_name": a["surah"]["englishName"],
+        "surah_arabic": a["surah"]["name"],
+        "ayah_number": a["numberInSurah"],
+        "arabic": a["text"],
+        "english": e["text"],
+        "audio": a.get("audio"),
+    }
+
+
+def safe_fetch_quran_verse(reference):
+    """Non-raising wrapper for inline enrichment loops; returns None on failure."""
     try:
-        ar = requests.get(f"{QURAN_API}/ayah/{reference}/ar.alafasy", timeout=8).json()
-        en = requests.get(f"{QURAN_API}/ayah/{reference}/en.asad", timeout=8).json()
-        if ar.get("status") != "OK" or en.get("status") != "OK":
-            return None
-        a = ar["data"]
-        e = en["data"]
-        return {
-            "reference": reference,
-            "surah_name": a["surah"]["englishName"],
-            "surah_arabic": a["surah"]["name"],
-            "ayah_number": a["numberInSurah"],
-            "arabic": a["text"],
-            "english": e["text"],
-            "audio": a.get("audio"),
-        }
+        return fetch_quran_verse(reference)
     except Exception:
         return None
 
@@ -300,13 +333,16 @@ def fetch_quran_verse(reference):
 # ============================================================
 @st.cache_data(ttl=600, show_spinner=False)
 def fetch_hadith(collection):
-    """Pull a hadith from a public random-hadith API."""
+    """Pull a hadith from a public random-hadith API. Returns None on failure."""
     try:
-        r = requests.get(f"{HADITH_API}/{collection}", timeout=8)
-        data = r.json().get("data", {})
+        payload = http_get_json(f"{HADITH_API}/{collection}")
+        data = payload.get("data", {})
+        text = clean_text(data.get("hadith_english", ""))
+        if not text:
+            return None
         return {
             "collection": collection.title(),
-            "text": clean_text(data.get("hadith_english", "")),
+            "text": text,
             "narrator": data.get("header", "").strip(),
             "book": data.get("book", ""),
             "number": data.get("hadith_no", ""),
@@ -338,13 +374,10 @@ def validate_hadith_web(hadith):
     status = "unknown"
     confidence = 0
     try:
-        resp = requests.get(
+        data = http_get_json(
             DDG_API,
             params={"q": search_query, "format": "json", "no_html": 1, "skip_disambig": 1},
-            timeout=8,
-            headers={"User-Agent": "QuranChatbot/1.0"},
         )
-        data = resp.json()
         abstract = data.get("AbstractText", "")
         if abstract:
             evidence.append(abstract[:300])
@@ -601,7 +634,7 @@ def agentic_pipeline(vector_store, tokenizer, model, prompt, query,
         if refs:
             log(f"📖 Fetching {len(refs)} verse(s) (Arabic + translation + audio)...")
         for ref in refs:
-            v = fetch_quran_verse(ref)
+            v = safe_fetch_quran_verse(ref)
             if v:
                 verses.append(v)
 
@@ -740,13 +773,21 @@ def render_verse_of_the_day():
     st.markdown("### 🌙 Verse of the Day")
     today = datetime.now().strftime("%Y-%m-%d")
     seed = int(hashlib.md5(("verse" + today).encode()).hexdigest(), 16)
-    surah = (seed % 114) + 1
-    ayah = (seed % 7) + 1
-    ref = f"{surah}:{ayah}"
-    with st.spinner("Fetching today's verse..."):
-        v = fetch_quran_verse(ref)
-    if not v:
-        st.info("Couldn't load the verse of the day (network). Try again later.")
+    # Pick from ALL 6,236 ayahs by global number (not just ayahs 1-7).
+    ref = str((seed % 6236) + 1)
+    try:
+        with st.spinner("Fetching today's verse..."):
+            v = fetch_quran_verse(ref)
+    except Exception as e:
+        st.info("Couldn't load the verse of the day right now.")
+        col_a, col_b = st.columns([1, 3])
+        with col_a:
+            if st.button("🔄 Retry", key="retry_votd"):
+                fetch_quran_verse.clear()   # clear cached failure
+                st.rerun()
+        with col_b:
+            with st.expander("Error details"):
+                st.caption(str(e))
         return
     st.markdown(f"<div class='verse-arabic'>{v['arabic']}</div>", unsafe_allow_html=True)
     st.markdown(f"*{v['english']}*")
