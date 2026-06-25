@@ -16,6 +16,14 @@ from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.prompts import PromptTemplate
 from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 
+# Cross-encoder re-ranker. Imported lazily/guarded so the app still runs
+# if sentence-transformers isn't installed (falls back to vector order).
+try:
+    from sentence_transformers import CrossEncoder
+    _HAS_CROSS_ENCODER = True
+except Exception:
+    _HAS_CROSS_ENCODER = False
+
 
 # ============================================================
 # CONFIG
@@ -23,6 +31,11 @@ from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
 FAISS_DIR = "quran_faiss_index"
 EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 LLM_MODEL = "google/flan-t5-base"
+RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"  # fast, lightweight re-ranker
+
+# How many candidates to pull from FAISS before re-ranking down to top-k.
+RETRIEVAL_FETCH_MULTIPLIER = 4   # fetch k * this many candidates per sub-query
+MAX_SUBQUERIES = 4               # original + up to 3 rephrasings
 
 # Public, free, no-key APIs used by the agentic layer.
 QURAN_API = "https://api.alquran.cloud/v1"          # verses, translations, audio
@@ -185,6 +198,16 @@ def initialize_llm():
     if hasattr(model.config, "tie_word_embeddings"):
         model.config.tie_word_embeddings = False
     return tokenizer, model
+
+
+def initialize_reranker():
+    """Load the cross-encoder re-ranker, or None if unavailable."""
+    if not _HAS_CROSS_ENCODER:
+        return None
+    try:
+        return CrossEncoder(RERANKER_MODEL)
+    except Exception:
+        return None
 
 
 def create_prompt():
@@ -376,17 +399,21 @@ def extract_verse_refs(text):
     return out[:4]
 
 
-def score_to_relevance(score, all_scores):
+def score_to_relevance(score, all_scores, higher_is_better=False):
     if not all_scores:
         return 0
     lo, hi = min(all_scores), max(all_scores)
     if hi == lo:
         return 100
-    pct = 100 * (1 - (score - lo) / (hi - lo))
+    if higher_is_better:
+        pct = 100 * (score - lo) / (hi - lo)
+    else:
+        # smaller distance -> higher percentage
+        pct = 100 * (1 - (score - lo) / (hi - lo))
     return max(5, min(100, round(pct)))
 
 
-def format_sources(docs, scores=None):
+def format_sources(docs, scores=None, higher_is_better=False):
     sources, seen = [], set()
     scores = scores or [None] * len(docs)
     for i, (doc, score) in enumerate(zip(docs, scores), start=1):
@@ -402,8 +429,93 @@ def format_sources(docs, scores=None):
         sources.append({"id": i, "content": text, "score": score, "badges": badges})
     rel = [s["score"] for s in sources if s["score"] is not None]
     for s in sources:
-        s["relevance"] = score_to_relevance(s["score"], rel) if s["score"] is not None else None
+        s["relevance"] = (
+            score_to_relevance(s["score"], rel, higher_is_better)
+            if s["score"] is not None else None
+        )
     return sources
+
+
+# ============================================================
+# GENERATION
+# ============================================================
+# MULTI-QUERY GENERATION (query expansion)
+# ============================================================
+def generate_query_variations(tokenizer, model, query, n=3):
+    """
+    Use FLAN-T5 to rephrase the question into semantically diverse variants.
+    More phrasings = better recall on a small FAISS index, because a single
+    embedding can miss passages worded differently from the user's question.
+    Always returns the original query first, then up to n rephrasings.
+    """
+    variations = [query]
+    try:
+        instruction = (
+            "Rephrase the following question in 3 different ways that mean the "
+            "same thing, each on a new line, using varied wording and synonyms.\n\n"
+            f"Question: {query}\n\nRephrasings:"
+        )
+        inputs = tokenizer(instruction, return_tensors="pt", truncation=True, max_length=512)
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs, max_new_tokens=120, num_beams=4,
+                num_return_sequences=1, no_repeat_ngram_size=2,
+            )
+        raw = tokenizer.decode(outputs[0], skip_special_tokens=True)
+        for line in re.split(r"[\n;]|(?:\d+[\).])", raw):
+            cand = clean_text(line)
+            cand = re.sub(r"^(rephrasing|question|answer)s?\s*[:\-]?\s*", "", cand, flags=re.I)
+            if cand and cand.lower() != query.lower() and len(cand) > 8:
+                if cand not in variations:
+                    variations.append(cand)
+    except Exception:
+        pass
+    return variations[:n + 1]
+
+
+# ============================================================
+# MULTI-QUERY RETRIEVAL + CROSS-ENCODER RE-RANKING
+# ============================================================
+def multi_query_retrieve(vector_store, queries, k, fetch_per_query):
+    """Retrieve candidates for every sub-query and deduplicate by content."""
+    pool = {}  # content -> (doc, best_distance)
+    for q in queries:
+        try:
+            results = vector_store.similarity_search_with_score(q, k=fetch_per_query)
+        except Exception:
+            continue
+        for doc, dist in results:
+            key = clean_text(doc.page_content)
+            if not key:
+                continue
+            if key not in pool or dist < pool[key][1]:
+                pool[key] = (doc, dist)
+    # list of (doc, distance)
+    return [(doc, dist) for doc, dist in pool.values()]
+
+
+def rerank_candidates(reranker, query, candidates, k):
+    """
+    Re-score candidates with a cross-encoder (joint query+passage scoring),
+    which is far more accurate than bi-encoder cosine distance. Falls back to
+    vector distance order if no re-ranker is available.
+    Returns top-k list of (doc, rerank_score_or_distance, used_reranker).
+    """
+    if not candidates:
+        return []
+    if reranker is None:
+        # fall back: sort by ascending distance (smaller = closer)
+        ordered = sorted(candidates, key=lambda x: x[1])[:k]
+        return [(doc, dist, False) for doc, dist in ordered]
+    pairs = [(query, clean_text(doc.page_content)) for doc, _ in candidates]
+    try:
+        scores = reranker.predict(pairs)
+    except Exception:
+        ordered = sorted(candidates, key=lambda x: x[1])[:k]
+        return [(doc, dist, False) for doc, dist in ordered]
+    scored = list(zip([c[0] for c in candidates], scores))
+    scored.sort(key=lambda x: x[1], reverse=True)  # higher rerank score = better
+    return [(doc, float(s), True) for doc, s in scored[:k]]
 
 
 # ============================================================
@@ -425,6 +537,7 @@ def generate_answer(tokenizer, model, prompt_text, max_new_tokens=220):
 def agentic_pipeline(vector_store, tokenizer, model, prompt, query,
                      k=4, max_new_tokens=220, enable_hadith=True,
                      enable_web_validation=True, enable_verse_api=True,
+                     reranker=None, enable_multi_query=True, enable_rerank=True,
                      progress_cb=None):
     trace = []
 
@@ -436,33 +549,50 @@ def agentic_pipeline(vector_store, tokenizer, model, prompt, query,
     steps, matched_topic = plan_agentic_steps(query)
     log(f"🧭 Planned {len(steps)} steps (topic: {matched_topic or 'general'})")
 
-    # 1) Retrieval
-    log("🔎 Retrieving Quran passages from FAISS...")
-    results = vector_store.similarity_search_with_score(query, k=k)
-    if not results:
+    # 1) Multi-query expansion
+    if enable_multi_query:
+        log("🔁 Expanding query into multiple phrasings...")
+        sub_queries = generate_query_variations(tokenizer, model, query, n=MAX_SUBQUERIES - 1)
+        log(f"   → {len(sub_queries)} search queries: " +
+            " | ".join(q[:40] for q in sub_queries))
+    else:
+        sub_queries = [query]
+
+    # 2) Retrieval (fetch a wider candidate pool than k)
+    log("🔎 Retrieving candidate passages from FAISS...")
+    fetch_per_query = max(k * RETRIEVAL_FETCH_MULTIPLIER, k)
+    candidates = multi_query_retrieve(vector_store, sub_queries, k, fetch_per_query)
+    if not candidates:
         return {
             "answer": "No relevant Quran verses were found for this question.",
             "sources": [], "context": "", "elapsed": 0.0,
             "hadith": None, "validation": None, "verses": [],
             "trace": trace, "topic": matched_topic,
         }
-    docs = [d for d, _ in results]
-    scores = [s for _, s in results]
+    log(f"   → {len(candidates)} unique candidates pooled")
 
-    context_chunks = []
-    for doc in docs:
-        chunk = clean_text(doc.page_content)
-        context_chunks.append(chunk[:1400])
+    # 3) Re-ranking with cross-encoder
+    use_reranker = enable_rerank and reranker is not None
+    if use_reranker:
+        log("🎯 Re-ranking candidates with cross-encoder...")
+    elif enable_rerank:
+        log("🎯 Re-ranker unavailable — sorting by vector distance.")
+    ranked = rerank_candidates(reranker if use_reranker else None, query, candidates, k)
+    docs = [d for d, _, _ in ranked]
+    scores = [s for _, s, _ in ranked]
+    used_reranker = ranked[0][2] if ranked else False
+
+    context_chunks = [clean_text(d.page_content)[:1400] for d in docs]
     context = "\n\n".join(context_chunks)
 
-    # 2) Generation
+    # 4) Generation
     log("✍️ Generating grounded answer with FLAN-T5...")
     final_prompt = prompt.format(query=query, context=context)
     start = time.time()
     answer = generate_answer(tokenizer, model, final_prompt, max_new_tokens)
     elapsed = time.time() - start
 
-    sources = format_sources(docs, scores)
+    sources = format_sources(docs, scores, higher_is_better=used_reranker)
 
     # 3) Verse enrichment via Quran API
     verses = []
@@ -494,6 +624,8 @@ def agentic_pipeline(vector_store, tokenizer, model, prompt, query,
         "answer": answer, "sources": sources, "context": context, "elapsed": elapsed,
         "hadith": hadith, "validation": validation, "verses": verses,
         "trace": trace, "topic": matched_topic, "steps": steps,
+        "sub_queries": sub_queries, "candidate_count": len(candidates),
+        "used_reranker": used_reranker,
     }
 
 
@@ -514,7 +646,8 @@ def initialize_models():
     vector_store = load_vector_store()
     tokenizer, model = initialize_llm()
     prompt = create_prompt()
-    return vector_store, tokenizer, model, prompt
+    reranker = initialize_reranker()
+    return vector_store, tokenizer, model, prompt, reranker
 
 
 # ============================================================
@@ -537,11 +670,16 @@ def init_session():
 # ============================================================
 def run_query(query, vector_store, tokenizer, model, prompt, k, max_tokens,
               enable_hadith=True, enable_web_validation=True, enable_verse_api=True,
-              progress_cb=None):
+              reranker=None, enable_multi_query=True, enable_rerank=True,
+              progress_cb=None, **_ignore):
     try:
         result = agentic_pipeline(
-            vector_store, tokenizer, model, prompt, query, k, max_tokens,
-            enable_hadith, enable_web_validation, enable_verse_api, progress_cb,
+            vector_store=vector_store, tokenizer=tokenizer, model=model,
+            prompt=prompt, query=query, k=k, max_new_tokens=max_tokens,
+            enable_hadith=enable_hadith, enable_web_validation=enable_web_validation,
+            enable_verse_api=enable_verse_api, reranker=reranker,
+            enable_multi_query=enable_multi_query, enable_rerank=enable_rerank,
+            progress_cb=progress_cb,
         )
     except Exception as e:
         st.error(f"Error while generating response: {e}")
@@ -557,6 +695,9 @@ def run_query(query, vector_store, tokenizer, model, prompt, k, max_tokens,
         "verses": result["verses"],
         "trace": result["trace"],
         "topic": result.get("topic"),
+        "sub_queries": result.get("sub_queries", []),
+        "candidate_count": result.get("candidate_count"),
+        "used_reranker": result.get("used_reranker", False),
         "query": query,
         "elapsed": result["elapsed"],
         "feedback": None,
@@ -694,13 +835,29 @@ def render_sample_questions(deps):
 # ============================================================
 # SIDEBAR
 # ============================================================
-def render_sidebar():
+def render_sidebar(reranker_available=False):
     with st.sidebar:
         st.header("⚙️ Settings")
         k = st.slider("Retrieved passages", 2, 8, 4, 1)
         max_tokens = st.slider("Answer length", 80, 400, 220, 20)
         show_sources_default = st.toggle("Show sources by default", value=False)
         show_context = st.toggle("Show retrieved context block", value=False)
+
+        st.divider()
+        st.subheader("🔎 Retrieval Quality")
+        enable_multi_query = st.toggle(
+            "Multi-query expansion", value=True,
+            help="Rephrase your question several ways to catch passages worded differently.",
+        )
+        rerank_label = "Cross-encoder re-ranking"
+        if not reranker_available:
+            rerank_label += " (unavailable)"
+        enable_rerank = st.toggle(
+            rerank_label, value=reranker_available, disabled=not reranker_available,
+            help="Re-score candidates with a cross-encoder for more accurate top results."
+                 if reranker_available else
+                 "Install sentence-transformers to enable cross-encoder re-ranking.",
+        )
 
         st.divider()
         st.subheader("🤖 Agentic Tools")
@@ -737,8 +894,9 @@ def render_sidebar():
 
         st.divider()
         st.subheader("ℹ️ About")
-        st.caption("Model: google/flan-t5-base")
+        st.caption("LLM: google/flan-t5-base")
         st.caption("Embeddings: all-MiniLM-L6-v2")
+        st.caption("Re-ranker: ms-marco-MiniLM-L-6-v2")
         st.caption("Index: local FAISS")
         st.caption("APIs: AlQuran.cloud · Hadith API · DuckDuckGo")
 
@@ -747,6 +905,7 @@ def render_sidebar():
         "show_sources_default": show_sources_default, "show_context": show_context,
         "enable_hadith": enable_hadith, "enable_web_validation": enable_web_validation,
         "enable_verse_api": enable_verse_api,
+        "enable_multi_query": enable_multi_query, "enable_rerank": enable_rerank,
     }
 
 
@@ -895,6 +1054,22 @@ def render_result(latest, deps):
             for src in latest["sources"]:
                 render_source_card(src, show_expanded=deps["show_sources_default"])
     with tab5:
+        # Retrieval quality summary
+        sq = latest.get("sub_queries", [])
+        cc = latest.get("candidate_count")
+        rr = latest.get("used_reranker")
+        if sq or cc is not None:
+            bits = []
+            if len(sq) > 1:
+                bits.append(f"**{len(sq)} search queries** (multi-query expansion)")
+            if cc is not None:
+                bits.append(f"**{cc} candidates** pooled")
+            bits.append("ranked by **cross-encoder**" if rr else "ranked by **vector distance**")
+            st.caption("Retrieval: " + " · ".join(bits))
+            if len(sq) > 1:
+                with st.expander("🔁 Query variations used"):
+                    for s in sq:
+                        st.markdown(f"- {s}")
         for step in latest.get("trace", []):
             st.markdown(f"<div class='step-line'>{step}</div>", unsafe_allow_html=True)
         if deps["show_context"]:
@@ -1026,14 +1201,19 @@ def render_about_tab():
 
         **How the agent works on each question:**
         1. 🧭 **Plans** which tools to use based on your question's topic.
-        2. 🔎 **Retrieves** the most relevant passages from a local **FAISS** index
+        2. 🔁 **Expands** your question into several phrasings (multi-query) so
+           passages worded differently still get found.
+        3. 🔎 **Retrieves** a wide candidate pool from a local **FAISS** index
            (embedded with all-MiniLM-L6-v2).
-        3. ✍️ **Generates** a grounded answer with **google/flan-t5-base**.
-        4. 📖 **Enriches** detected verse references with Arabic text, translation,
+        4. 🎯 **Re-ranks** candidates with a **cross-encoder**
+           (ms-marco-MiniLM) that scores each passage jointly with your question
+           — far more accurate than embedding distance alone.
+        5. ✍️ **Generates** a grounded answer with **google/flan-t5-base**.
+        6. 📖 **Enriches** detected verse references with Arabic text, translation,
            and recitation **audio** (AlQuran.cloud API).
-        5. 📜 **Fetches a related Hadith** from public collections.
-        6. 🌐 **Cross-checks** the Hadith's authenticity via live **web validation**.
-        7. ✅ **Assembles** a cited, verified response with a reasoning trace.
+        7. 📜 **Fetches a related Hadith** from public collections.
+        8. 🌐 **Cross-checks** the Hadith's authenticity via live **web validation**.
+        9. ✅ **Assembles** a cited, verified response with a reasoning trace.
 
         **Interactive features:**
         - 🌙 Verse of the Day with audio recitation
@@ -1070,22 +1250,25 @@ def main():
         unsafe_allow_html=True,
     )
 
-    settings = render_sidebar()
-
     try:
-        with st.spinner("Loading Quran index and language model..."):
-            vector_store, tokenizer, model, prompt = initialize_models()
+        with st.spinner("Loading Quran index, language model, and re-ranker..."):
+            vector_store, tokenizer, model, prompt, reranker = initialize_models()
     except Exception as e:
         st.error(f"Initialization failed: {e}")
         st.stop()
 
+    settings = render_sidebar(reranker_available=reranker is not None)
+
     # dependency bundle passed to run_query
     deps = {
         "vector_store": vector_store, "tokenizer": tokenizer, "model": model,
-        "prompt": prompt, "k": settings["k"], "max_tokens": settings["max_tokens"],
+        "prompt": prompt, "reranker": reranker,
+        "k": settings["k"], "max_tokens": settings["max_tokens"],
         "enable_hadith": settings["enable_hadith"],
         "enable_web_validation": settings["enable_web_validation"],
         "enable_verse_api": settings["enable_verse_api"],
+        "enable_multi_query": settings["enable_multi_query"],
+        "enable_rerank": settings["enable_rerank"],
     }
     # extra keys used only for rendering
     render_deps = {**deps, "show_sources_default": settings["show_sources_default"],
