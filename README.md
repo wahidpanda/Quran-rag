@@ -27,6 +27,7 @@ Built with **Streamlit**, using only free, no-key public APIs.
 ## 🏗️ Architecture
 
 ```mermaid
+
 flowchart TD
     A([User Question]) --> B[🧭 Planner<br/>plan_agentic_steps]
     B --> C{Multi-query<br/>enabled?}
@@ -73,7 +74,7 @@ flowchart TD
     N -.-> DDG
 ```
 
----
+
 
 ## 🧰 Tech Stack
 
